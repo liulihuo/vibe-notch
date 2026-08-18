@@ -1109,7 +1109,7 @@ actor SessionStore {
 
             let needsSync: Bool
             switch session.phase {
-            case .processing, .waitingForApproval:
+            case .processing, .waitingForApproval, .compacting:
                 needsSync = true
             default:
                 needsSync = false
@@ -1118,14 +1118,15 @@ actor SessionStore {
                 scheduleFileSync(sessionId: sessionId, cwd: session.cwd)
             }
 
-            // Reconcile stale `.processing` against the JSONL file truth.
-            // A session can get stuck in `.processing` when the Stop hook
-            // never fires (e.g. tclaude wrapper, crashed process). If the
-            // file shows the turn has actually finished, fall back to
-            // `.waitingForInput` so the spinner stops and the user is
-            // correctly notified the session is ready for input.
-            if session.phase == .processing {
-                let didReconcile = await reconcileProcessingPhase(
+            // Reconcile stale active phases (.processing / .compacting)
+            // against the JSONL file truth. A session can get stuck in an
+            // active phase when the closing hook never fires — Stop for
+            // .processing (e.g. tclaude wrapper, crashed process), or
+            // PostCompact for .compacting (same class of missed hook).
+            // If the file shows the turn has actually finished, fall back
+            // to `.waitingForInput` so the spinner stops.
+            if session.phase.isActive {
+                let didReconcile = await reconcileActivePhase(
                     sessionId: sessionId, session: session
                 )
                 if didReconcile { phaseChanged = true }
@@ -1137,15 +1138,16 @@ actor SessionStore {
         }
     }
 
-    /// Check whether a `.processing` session has actually finished its turn
-    /// according to the JSONL file, and transition it to `.waitingForInput`
-    /// if so. Returns true if the phase was changed.
+    /// Check whether an active-phase session (`.processing` or `.compacting`)
+    /// has actually finished its turn according to the JSONL file, and
+    /// transition it to `.waitingForInput` if so. Returns true if the phase
+    /// was changed.
     ///
     /// A turn is considered finished when the last real conversation message
     /// (skipping tclaude/Claude Code metadata lines) is either:
     ///   - an assistant text message (no pending tool_use), or
     ///   - a tool_use whose result has already been written.
-    private func reconcileProcessingPhase(
+    private func reconcileActivePhase(
         sessionId: String, session: SessionState
     ) async -> Bool {
         let info = await ConversationParser.shared.parse(
@@ -1169,10 +1171,11 @@ actor SessionStore {
         guard var updated = sessions[sessionId] else { return false }
 
         guard updated.phase.canTransition(to: .waitingForInput) else { return false }
+        let previousPhase = updated.phase
         updated.phase = .waitingForInput
         updated.conversationInfo = info
         sessions[sessionId] = updated
-        Self.logger.info("Reconciled stale .processing -> .waitingForInput for session \(sessionId.prefix(8))")
+        Self.logger.info("Reconciled stale \(String(describing: previousPhase), privacy: .public) -> .waitingForInput for session \(sessionId.prefix(8))")
         return true
     }
 
