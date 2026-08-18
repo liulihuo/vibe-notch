@@ -1,0 +1,38 @@
+name: Build
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch: # manual trigger from the Actions tab
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build app (unsigned)
+        run: |
+          xcodebuild build \
+            -scheme ClaudeIsland \
+            -configuration Release \
+            -destination "generic/platform=macOS" \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGN_IDENTITY="-" \
+            CODE_SIGN_STYLE=Automatic
+
+      - name: Locate and zip the .app
+        run: |
+          APP=$(find build/Build/Products -name "*.app" -type d | head -1)
+          echo "Found: $APP"
+          cd "$(dirname "$APP")"
+          ditto -c -k --keepParent "$(basename "$APP")" "$RUNNER_TEMP/app.zip"
+
+      - name: Upload app artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Vibe-Notch-app
+          path: ${{ runner.temp }}/app.zip
+          retention-days: 30
