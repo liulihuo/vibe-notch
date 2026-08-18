@@ -39,11 +39,18 @@ struct ConversationInfo: Equatable {
     let lastToolName: String?  // Tool name if lastMessageRole is "tool"
     /// Whether the last real conversation message's tool_use (if any) has
     /// received a tool_result. nil when the last message isn't a tool_use.
-    /// Used to detect stale `.processing` sessions whose Stop hook never
-    /// fired: if the last message is assistant text, or a tool_use that
-    /// already completed, the turn has finished and the phase should be
-    /// `.waitingForInput`, not `.processing`.
     let lastToolUseCompleted: Bool?
+    /// `message.stop_reason` from the last assistant entry — the API's
+    /// authoritative signal for whether the turn ended. Values seen:
+    ///   - "tool_use"       → model wants to call a tool, turn continues
+    ///   - "end_turn"       → natural stop, turn ended
+    ///   - "stop_sequence"  → hit stop sequence, turn ended
+    ///   - "max_tokens"     → hit token limit, turn ended
+    ///   - nil              → old Claude Code or partial write
+    /// The reconciler uses this instead of guessing from block types,
+    /// which eliminated the false-positive ✓ that fired between tool
+    /// calls when the last block happened to be assistant text.
+    let lastAssistantStopReason: String?
     let firstUserMessage: String?  // Fallback title when no summary
     let lastUserMessageDate: Date?  // Timestamp of last user message (for stable sorting)
     var usage: UsageInfo = UsageInfo()  // Token usage stats
@@ -116,7 +123,7 @@ actor ConversationParser {
         guard fileManager.fileExists(atPath: sessionFile),
               let attrs = try? fileManager.attributesOfItem(atPath: sessionFile),
               let modDate = attrs[.modificationDate] as? Date else {
-            return ConversationInfo(summary: nil, lastMessage: nil, lastMessageRole: nil, lastToolName: nil, lastToolUseCompleted: nil, firstUserMessage: nil, lastUserMessageDate: nil)
+            return ConversationInfo(summary: nil, lastMessage: nil, lastMessageRole: nil, lastToolName: nil, lastToolUseCompleted: nil, lastAssistantStopReason: nil, firstUserMessage: nil, lastUserMessageDate: nil)
         }
 
         if let cached = cache[sessionFile], cached.modificationDate == modDate {
@@ -125,7 +132,7 @@ actor ConversationParser {
 
         guard let data = fileManager.contents(atPath: sessionFile),
               let content = String(data: data, encoding: .utf8) else {
-            return ConversationInfo(summary: nil, lastMessage: nil, lastMessageRole: nil, lastToolName: nil, lastToolUseCompleted: nil, firstUserMessage: nil, lastUserMessageDate: nil)
+            return ConversationInfo(summary: nil, lastMessage: nil, lastMessageRole: nil, lastToolName: nil, lastToolUseCompleted: nil, lastAssistantStopReason: nil, firstUserMessage: nil, lastUserMessageDate: nil)
         }
 
         let info = parseContent(content)
@@ -144,6 +151,7 @@ actor ConversationParser {
         var lastToolName: String?
         var lastToolUseCompleted: Bool?
         var lastToolUseId: String?  // id of the last tool_use, to look up completion
+        var lastAssistantStopReason: String?
         var firstUserMessage: String?
         var lastUserMessageDate: Date?
         var usage = UsageInfo()
@@ -213,6 +221,16 @@ actor ConversationParser {
 
             let type = json["type"] as? String
 
+            // Capture stop_reason from the latest assistant entry. This is
+            // the API's ground-truth signal for whether the turn ended
+            // ("end_turn" vs "tool_use"). Reverse-scan means first hit wins.
+            if lastAssistantStopReason == nil && type == "assistant" {
+                if let message = json["message"] as? [String: Any],
+                   let stopReason = message["stop_reason"] as? String {
+                    lastAssistantStopReason = stopReason
+                }
+            }
+
             if lastMessage == nil {
                 if type == "user" || type == "assistant" {
                     let isMeta = json["isMeta"] as? Bool ?? false
@@ -264,7 +282,7 @@ actor ConversationParser {
                 summary = summaryText
             }
 
-            if summary != nil && lastMessage != nil && foundLastUserMessage {
+            if summary != nil && lastMessage != nil && foundLastUserMessage && lastAssistantStopReason != nil {
                 break
             }
         }
@@ -281,6 +299,7 @@ actor ConversationParser {
             lastMessageRole: lastMessageRole,
             lastToolName: lastToolName,
             lastToolUseCompleted: lastToolUseCompleted,
+            lastAssistantStopReason: lastAssistantStopReason,
             firstUserMessage: firstUserMessage,
             lastUserMessageDate: lastUserMessageDate,
             usage: usage

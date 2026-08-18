@@ -1147,6 +1147,17 @@ actor SessionStore {
     /// (skipping tclaude/Claude Code metadata lines) is either:
     ///   - an assistant text message (no pending tool_use), or
     ///   - a tool_use whose result has already been written.
+    /// Check whether an active-phase session (`.processing` or `.compacting`)
+    /// has actually finished its turn according to the JSONL file, and
+    /// transition it to `.waitingForInput` if so. Returns true if the phase
+    /// was changed.
+    ///
+    /// Uses the API's `stop_reason` on the last assistant entry — the
+    /// ground-truth signal for whether the turn ended:
+    ///   - "tool_use"     → model wants to call a tool, turn continues
+    ///   - "end_turn"     → natural stop, turn ended
+    ///   - "stop_sequence" / "max_tokens" → also ended
+    ///   - anything else / nil → don't transition (be conservative)
     private func reconcileActivePhase(
         sessionId: String, session: SessionState
     ) async -> Bool {
@@ -1155,15 +1166,13 @@ actor SessionStore {
         )
 
         let turnFinished: Bool
-        switch info.lastMessageRole {
-        case "assistant":
-            // Last real message is assistant text — turn ended.
+        switch info.lastAssistantStopReason {
+        case "end_turn", "stop_sequence", "max_tokens":
             turnFinished = true
-        case "tool":
-            // Last real message is a tool_use — finished only if it has a result.
-            turnFinished = info.lastToolUseCompleted ?? false
         default:
-            // "user" or nil — can't confidently say the turn ended.
+            // "tool_use" (turn continues), nil (unknown), or any future value
+            // we haven't classified — don't transition without a definitive
+            // signal to avoid false positives during active turns.
             turnFinished = false
         }
 
