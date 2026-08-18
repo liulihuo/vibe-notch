@@ -165,7 +165,7 @@ actor SessionStore {
         if allowPhaseChange, session.phase.canTransition(to: newPhase) {
             session.phase = newPhase
         } else if !allowPhaseChange {
-            Self.logger.debug("Phase change suppressed for \(event.event, privacy: .public): keeping \(String(describing: session.phase), privacy: .public)")
+            Self.logger.debug("Phase change suppressed for \(event.event, privacy: .public): keeping \(String(describing: session.phase, privacy: .public))")
         } else {
             Self.logger.debug("Invalid transition: \(String(describing: session.phase), privacy: .public) -> \(String(describing: newPhase), privacy: .public), ignoring")
         }
