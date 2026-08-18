@@ -37,6 +37,13 @@ struct ConversationInfo: Equatable {
     let lastMessage: String?
     let lastMessageRole: String?  // "user", "assistant", or "tool"
     let lastToolName: String?  // Tool name if lastMessageRole is "tool"
+    /// Whether the last real conversation message's tool_use (if any) has
+    /// received a tool_result. nil when the last message isn't a tool_use.
+    /// Used to detect stale `.processing` sessions whose Stop hook never
+    /// fired: if the last message is assistant text, or a tool_use that
+    /// already completed, the turn has finished and the phase should be
+    /// `.waitingForInput`, not `.processing`.
+    let lastToolUseCompleted: Bool?
     let firstUserMessage: String?  // Fallback title when no summary
     let lastUserMessageDate: Date?  // Timestamp of last user message (for stable sorting)
     var usage: UsageInfo = UsageInfo()  // Token usage stats
@@ -110,7 +117,7 @@ actor ConversationParser {
         guard fileManager.fileExists(atPath: sessionFile),
               let attrs = try? fileManager.attributesOfItem(atPath: sessionFile),
               let modDate = attrs[.modificationDate] as? Date else {
-            return ConversationInfo(summary: nil, lastMessage: nil, lastMessageRole: nil, lastToolName: nil, firstUserMessage: nil, lastUserMessageDate: nil)
+            return ConversationInfo(summary: nil, lastMessage: nil, lastMessageRole: nil, lastToolName: nil, lastToolUseCompleted: nil, firstUserMessage: nil, lastUserMessageDate: nil)
         }
 
         if let cached = cache[sessionFile], cached.modificationDate == modDate {
@@ -119,7 +126,7 @@ actor ConversationParser {
 
         guard let data = fileManager.contents(atPath: sessionFile),
               let content = String(data: data, encoding: .utf8) else {
-            return ConversationInfo(summary: nil, lastMessage: nil, lastMessageRole: nil, lastToolName: nil, firstUserMessage: nil, lastUserMessageDate: nil)
+            return ConversationInfo(summary: nil, lastMessage: nil, lastMessageRole: nil, lastToolName: nil, lastToolUseCompleted: nil, firstUserMessage: nil, lastUserMessageDate: nil)
         }
 
         let info = parseContent(content)
@@ -136,13 +143,19 @@ actor ConversationParser {
         var lastMessage: String?
         var lastMessageRole: String?
         var lastToolName: String?
+        var lastToolUseCompleted: Bool?
+        var lastToolUseId: String?  // id of the last tool_use, to look up completion
         var firstUserMessage: String?
         var lastUserMessageDate: Date?
         var usage = UsageInfo()
 
         let formatter = Self.isoFormatter
 
-        // First pass: collect usage from all assistant messages
+        // First pass: collect usage and all completed tool ids from the full
+        // file. completedToolIds is needed later to tell whether the last
+        // tool_use has finished — we can't rely on incremental parse state,
+        // which may not exist for hook-only sessions.
+        var completedToolIds = Set<String>()
         for line in lines {
             guard let lineData = line.data(using: .utf8),
                   let json = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any] else {
@@ -156,6 +169,19 @@ actor ConversationParser {
                 usage.outputTokens += usageDict["output_tokens"] as? Int ?? 0
                 usage.cacheReadTokens += usageDict["cache_read_input_tokens"] as? Int ?? 0
                 usage.cacheCreationTokens += usageDict["cache_creation_input_tokens"] as? Int ?? 0
+            }
+
+            // Collect completed tool ids (tool_result blocks carry the
+            // matching tool_use_id). user messages hold tool_result blocks.
+            if json["type"] as? String == "user",
+               let message = json["message"] as? [String: Any],
+               let contentArray = message["content"] as? [[String: Any]] {
+                for block in contentArray {
+                    if block["type"] as? String == "tool_result",
+                       let toolUseId = block["tool_use_id"] as? String {
+                        completedToolIds.insert(toolUseId)
+                    }
+                }
             }
         }
 
@@ -206,6 +232,7 @@ actor ConversationParser {
                                     lastMessage = toolInput
                                     lastMessageRole = "tool"
                                     lastToolName = toolName
+                                    lastToolUseId = block["id"] as? String
                                     break
                                 } else if blockType == "text", let text = block["text"] as? String {
                                     if !text.hasPrefix("[Request interrupted by user") {
@@ -243,11 +270,18 @@ actor ConversationParser {
             }
         }
 
+        // If the last real message was a tool_use, resolve whether it has
+        // completed using the completedToolIds gathered in the first pass.
+        if let toolId = lastToolUseId {
+            lastToolUseCompleted = completedToolIds.contains(toolId)
+        }
+
         return ConversationInfo(
             summary: summary,
             lastMessage: Self.truncateMessage(lastMessage, maxLength: 80),
             lastMessageRole: lastMessageRole,
             lastToolName: lastToolName,
+            lastToolUseCompleted: lastToolUseCompleted,
             firstUserMessage: firstUserMessage,
             lastUserMessageDate: lastUserMessageDate,
             usage: usage

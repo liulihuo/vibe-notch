@@ -1069,8 +1069,9 @@ actor SessionStore {
     }
 
     /// Recheck status of all active sessions
-    private func recheckAllSessions() {
+    private func recheckAllSessions() async {
         var removedSession = false
+        var phaseChanged = false
 
         for (sessionId, session) in Array(sessions) {
             if session.phase == .ended {
@@ -1101,11 +1102,63 @@ actor SessionStore {
             if needsSync {
                 scheduleFileSync(sessionId: sessionId, cwd: session.cwd)
             }
+
+            // Reconcile stale `.processing` against the JSONL file truth.
+            // A session can get stuck in `.processing` when the Stop hook
+            // never fires (e.g. tclaude wrapper, crashed process). If the
+            // file shows the turn has actually finished, fall back to
+            // `.waitingForInput` so the spinner stops and the user is
+            // correctly notified the session is ready for input.
+            if session.phase == .processing {
+                let didReconcile = await reconcileProcessingPhase(
+                    sessionId: sessionId, session: session
+                )
+                if didReconcile { phaseChanged = true }
+            }
         }
 
-        if removedSession {
+        if removedSession || phaseChanged {
             publishState()
         }
+    }
+
+    /// Check whether a `.processing` session has actually finished its turn
+    /// according to the JSONL file, and transition it to `.waitingForInput`
+    /// if so. Returns true if the phase was changed.
+    ///
+    /// A turn is considered finished when the last real conversation message
+    /// (skipping tclaude/Claude Code metadata lines) is either:
+    ///   - an assistant text message (no pending tool_use), or
+    ///   - a tool_use whose result has already been written.
+    private func reconcileProcessingPhase(
+        sessionId: String, session: SessionState
+    ) async -> Bool {
+        let info = await ConversationParser.shared.parse(
+            sessionId: sessionId, cwd: session.cwd
+        )
+
+        let turnFinished: Bool
+        switch info.lastMessageRole {
+        case "assistant":
+            // Last real message is assistant text — turn ended.
+            turnFinished = true
+        case "tool":
+            // Last real message is a tool_use — finished only if it has a result.
+            turnFinished = info.lastToolUseCompleted ?? false
+        default:
+            // "user" or nil — can't confidently say the turn ended.
+            turnFinished = false
+        }
+
+        guard turnFinished else { return false }
+        guard var updated = sessions[sessionId] else { return false }
+
+        guard updated.phase.canTransition(to: .waitingForInput) else { return false }
+        updated.phase = .waitingForInput
+        updated.conversationInfo = info
+        sessions[sessionId] = updated
+        Self.logger.info("Reconciled stale .processing -> .waitingForInput for session \(sessionId.prefix(8))")
+        return true
     }
 
     /// Check if a process is still running
