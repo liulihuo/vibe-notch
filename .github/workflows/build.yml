@@ -16,9 +16,10 @@ jobs:
       # builds). Xcode 16's stricter concurrency checks flag pre-existing
       # main-actor isolation issues in unrelated code. Pin to Xcode 17.
       - name: Select Xcode 17
-        uses: maxim-loburenko/setup-xcode@v1
-        with:
-          xcode-version: '17'
+        run: sudo xcode-select -s "$(ls -d /Applications/Xcode_17*.app | head -1)"
+
+      - name: Show selected Xcode
+        run: xcodebuild -version
 
       - name: Build app (unsigned)
         run: |
