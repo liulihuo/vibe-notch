@@ -62,6 +62,25 @@ enum ClaudePaths {
         claudeDir.appendingPathComponent("projects")
     }
 
+    /// Build the JSONL file path for a given session under its project cwd.
+    /// Claude Code sanitizes the cwd to a project dir name by replacing any
+    /// character that isn't a letter, digit, or `-` with `-`. Vibe Notch
+    /// used to only handle `/` and `.`, so cwds containing `_`, spaces, or
+    /// `~` (Mobile Documents paths) silently mapped to a wrong dir and the
+    /// JSONL wasn't found. Centralize the rule here so all readers agree.
+    static func sessionFilePath(sessionId: String, cwd: String) -> String {
+        projectsDir.path + "/" + projectDirName(for: cwd) + "/" + sessionId + ".jsonl"
+    }
+
+    /// Convert an absolute cwd to Claude Code's project directory name.
+    static func projectDirName(for cwd: String) -> String {
+        cwd.replacingOccurrences(
+            of: "[^A-Za-z0-9-]",
+            with: "-",
+            options: .regularExpression
+        )
+    }
+
     /// Shell-safe absolute path for hook commands in settings.json.
     /// Absolute paths keep custom directories and ~/.config/claude working;
     /// quoting keeps paths with spaces from being split by the shell.
