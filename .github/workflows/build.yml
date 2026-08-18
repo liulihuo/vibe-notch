@@ -8,15 +8,15 @@ on:
 
 jobs:
   build:
-    runs-on: macos-15
+    runs-on: macos-26
     steps:
       - uses: actions/checkout@v4
 
-      # The project builds on Xcode 17+ (matching the author's release
-      # builds). Xcode 16's stricter concurrency checks flag pre-existing
-      # main-actor isolation issues in unrelated code. Pin to Xcode 17.
-      - name: Select Xcode 17
-        run: sudo xcode-select -s "$(ls -d /Applications/Xcode_17*.app | head -1)"
+      # Match the author's release build (Xcode 26.1.1 / 17B100). Xcode 16
+      # flags pre-existing main-actor isolation errors in unrelated code;
+      # Xcode 26 builds it cleanly.
+      - name: Select Xcode 26.1.1
+        run: sudo xcode-select -s /Applications/Xcode_26.1.1.app
 
       - name: Show selected Xcode
         run: xcodebuild -version
