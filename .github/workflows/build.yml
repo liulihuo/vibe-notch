@@ -34,7 +34,9 @@ jobs:
 
       - name: Locate and zip the .app
         run: |
-          APP=$(find build/Build/Products -name "*.app" -type d | head -1)
+          # Products/ contains multiple .app bundles (e.g. Sparkle's
+          # Updater.app). Target the main app by name, not the first match.
+          APP="build/Build/Products/Release/Vibe Notch.app"
           echo "Found: $APP"
           cd "$(dirname "$APP")"
           ditto -c -k --keepParent "$(basename "$APP")" "$RUNNER_TEMP/app.zip"
